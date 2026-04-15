@@ -24,4 +24,4 @@ We are new here , please be more understanding about something we not do really 
 
 Our software is partly in Chinese, foreigners please understand.
 
-(Our English not really well...)
+(Our English not really well...) If there are any objections between Chinese and English, the readme will be mainly in Chinese.
