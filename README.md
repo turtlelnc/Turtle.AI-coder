@@ -3,7 +3,7 @@ Our AI that focuses on writing code.
 
 try to do sth.
 
-# 简体中文（chinese）
+## 简体中文（chinese）
 
 尝试做某事（口号是：try to do sth.（因为英语老师老是说））。
 
@@ -17,7 +17,7 @@ try to do sth.
 
 （我们的英语不太好...）中英文如有异议，readme以中文为主
 
-# English（英语）
+## English（英语）
 
 Try to do something.
 
