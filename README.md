@@ -7,7 +7,7 @@ try to do sth.
 
 尝试做某事（口号是：try to do sth.（因为英语老师老是说））。
 
-你好 ！我们是turtle。由于AI的原因，您需要去分行“深入...”来观看我们的新进展。感谢您的理解。
+你好 ！我们是turtle。由于团队刚来到 Github ，还不熟悉 Github 的操作，可能会导致一些提交时创建其他分支的情况，请您谅解。
 
 我们是新来的，有些地方做得不好，还请多多理解。
 
@@ -17,13 +17,13 @@ try to do sth.
 
 我们的仓库有多个分支，分为前端、后端（模型）、下载应用程序和一些乱七八糟的分支
 
-（我们的英语不太好...）中英文如有异议，readme以中文为主
+（我们的英语不太好...我们通常会使用翻译器，中英文如有异议，readme以中文为主）。
 
 ## English（英语）
 
 Try to do something.
 
-Hello ! We are turtle . Because of the AI , you need to go to the branch 'in-depth...' to watch our new progress .Thanks for your understanding.
+Hello ! We are turtle . As our team has just joined GitHub and is not yet fully familiar with its operations, there may be occasional instances—such as the accidental creation of extra branches during commits—that arise as a result. We kindly ask for your understanding.
 
 We are new here , please be more understanding about something we not do really well .
 
@@ -33,4 +33,4 @@ We use various AI to produce, that is, AI does AI
 
 Our warehouse has multiple branches, divided into front-end, back-end (model), download application and some messy branches
 
-(Our English not really well...) If there are any objections between Chinese and English, the readme will be mainly in Chinese.
+(Our English not really well...We typically use translation tools; in the event of any discrepancies between the Chinese and English versions, the Chinese version of the README shall prevail.) 
