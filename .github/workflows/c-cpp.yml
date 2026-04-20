@@ -29,8 +29,8 @@ jobs:
                 -I/opt/homebrew/opt/libomp/include \
                 -L/opt/homebrew/opt/libomp/lib -lomp
           - os: windows-latest
-            cxx: g++        # 实际使用 MSYS2 的 MinGW g++
-            packages: mingw-w64-x86_64-gcc mingw-w64-x86_64-openmp
+            cxx: g++
+            packages: mingw-w64-x86_64-gcc make
             artifact: infer-windows
             compile_cmd: |
               g++ -std=c++17 -O3 -march=native -fopenmp -pthread infer.cpp -o infer.exe
@@ -40,10 +40,9 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Download nlohmann/json.hpp
-      run: |
-        # PowerShell 兼容写法
-        Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "json.hpp"
       shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "json.hpp"
 
     # ---------- Ubuntu ----------
     - name: Install dependencies (Ubuntu)
@@ -65,17 +64,12 @@ jobs:
       with:
         msystem: MINGW64
         update: true
-        install: >-
-          ${{ matrix.packages }}
-          make
-        pacboy: >-
-          toolchain:p
+        install: ${{ matrix.packages }}
 
     - name: Compile (Windows)
       if: matrix.os == 'windows-latest'
       shell: msys2 {0}
       run: |
-        # 确认 g++ 可用
         g++ --version
         ${{ matrix.compile_cmd }}
 
