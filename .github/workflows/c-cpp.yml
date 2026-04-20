@@ -1,0 +1,92 @@
+name: Build infer.cpp
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++-12
+            packages: libomp-dev
+            artifact: infer-ubuntu
+            compile_cmd: |
+              g++-12 -std=c++17 -O3 -march=native -fopenmp -pthread infer.cpp -o infer
+          - os: macos-latest
+            cxx: clang++
+            packages: libomp
+            artifact: infer-macos
+            compile_cmd: |
+              clang++ -std=c++17 -O3 -march=native -pthread infer.cpp -o infer \
+                -Xclang -fopenmp \
+                -I/opt/homebrew/opt/libomp/include \
+                -L/opt/homebrew/opt/libomp/lib -lomp
+          - os: windows-latest
+            cxx: g++        # 实际使用 MSYS2 的 MinGW g++
+            packages: mingw-w64-x86_64-gcc mingw-w64-x86_64-openmp
+            artifact: infer-windows
+            compile_cmd: |
+              g++ -std=c++17 -O3 -march=native -fopenmp -pthread infer.cpp -o infer.exe
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download nlohmann/json.hpp
+      run: |
+        # PowerShell 兼容写法
+        Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "json.hpp"
+      shell: pwsh
+
+    # ---------- Ubuntu ----------
+    - name: Install dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ${{ matrix.packages }}
+
+    # ---------- macOS ----------
+    - name: Install dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install ${{ matrix.packages }}
+
+    # ---------- Windows (MSYS2) ----------
+    - name: Setup MSYS2 and MinGW (Windows)
+      if: matrix.os == 'windows-latest'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          ${{ matrix.packages }}
+          make
+        pacboy: >-
+          toolchain:p
+
+    - name: Compile (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: |
+        # 确认 g++ 可用
+        g++ --version
+        ${{ matrix.compile_cmd }}
+
+    # ---------- Ubuntu / macOS 编译 ----------
+    - name: Compile (Ubuntu / macOS)
+      if: matrix.os != 'windows-latest'
+      run: ${{ matrix.compile_cmd }}
+
+    # ---------- 上传二进制文件 ----------
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact }}
+        path: infer*
