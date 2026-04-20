@@ -30,7 +30,14 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
+#define QK_K 256
 
+typedef struct {
+    uint16_t d;      // ggml_half, 全局缩放因子
+    uint16_t dmin;   // ggml_half, 全局最小偏移
+    uint8_t scales[12]; // 打包的 6-bit scales，12 字节
+    uint8_t qs[QK_K/2]; // 4-bit 量化值，128 字节
+} block_q4_K;  // 总共 144 字节
 namespace infer {
     enum class DataType {
         FP32, FP16, INT8, INT4, Q4_0, Q4_1, Q8_0, Q4_K, Q3_K,
@@ -201,53 +208,46 @@ namespace infer {
         }
 
         void dequantize_q4_K_row(const uint8_t* packed, float* dst, int64_t n) {
-            const int nb = static_cast<int>((n + 255) / 256);
-            const uint8_t* const start = packed;
-            
-            
-            // 计算预期的总字节数
-            // Q4_K 格式：每个 256 元素的块需要 152 字节
-            size_t expected_bytes = nb * 144;
-            
-            for (int b = 0; b < nb; ++b) {
-                // 检查是否有足够的数据读取 scales (12 字节) 和 q3_scale 信息
-                // 注意：packed 可能不是以 block 为单位对齐的，但我们需要确保有至少 24 字节
-                
-                const uint8_t* scales = packed;
-                const uint8_t* mins = packed + 12;
-                packed += 24;  // 跳过 scales 和 mins 区域（各12字节）
+            const int nb = (int)(n / QK_K);
+            const block_q4_K* x = reinterpret_cast<const block_q4_K*>(packed);
         
-                size_t blk_size = std::min<size_t>(256, static_cast<size_t>(n - b * 256));
-                
-                // 每个 block 有最多 16 个子块（每个子块处理 16 个元素）
-                for (int i = 0; i < 16 && i * 16 < static_cast<int>(blk_size); ++i) {
-                    // 读取 scale 和 min (FP16)
-                    uint16_t scale_f16, min_f16;
-                    std::memcpy(&scale_f16, scales + i * 2, 2);
-                    std::memcpy(&min_f16, mins + i * 2, 2);
+            for (int i = 0; i < nb; i++) {
+                const float d = fp16_to_fp32(x[i].d);
+                const float min = fp16_to_fp32(x[i].dmin);
         
-                    float d = fp16_to_fp32(scale_f16);
-                    float m = fp16_to_fp32(min_f16);
+                const uint8_t* sc = x[i].scales;
+                const uint8_t* q  = x[i].qs;
         
-                    size_t sub_blk = std::min<size_t>(16, blk_size - i * 16);
-                    
-                    // 关键检查：确保有 8 字节的量化数据可读
-                    // 每个子块包含 16 个 4-bit 值 = 8 字节
-                    // 但我们无法在函数内检查边界，因为不知道 packed 的总大小
-                    // 所以依赖调用者保证传入的数据足够大
-                    
-                    for (size_t j = 0; j < sub_blk; ++j) {
-                        // 每个字节包含 2 个 4-bit 值
-                        size_t byte_idx = j / 2;
-                        int shift = (j % 2) * 4;
-                        
-                        // 注意：这里假设 packed 至少还有 byte_idx + 1 字节可读
-                        uint8_t v = (packed[byte_idx] >> shift) & 0x0F;
-                        dst[b * 256 + i * 16 + j] = d * (static_cast<float>(v) - m);
+                int is = 0;
+                for (int j = 0; j < QK_K / 16; j++) {
+                    // 提取 6-bit scale (sc_j)
+                    uint8_t sc_j;
+                    if (j < 12) {
+                        // 前 12 个子块：低 4 位来自 scales[j/2] 的高/低半字节，高 2 位来自 scales[12 + j/4] 的对应位
+                        const uint8_t low4  = (sc[j/2] >> (4 * (j % 2))) & 0x0F;
+                        const uint8_t high2 = (sc[12 + j/4] >> (2 * (j % 4))) & 0x03;
+                        sc_j = low4 | (high2 << 4);
+                    } else {
+                        // 后 4 个子块复用前 4 个子块的 scale（j=12 复用 j=0，j=13 复用 j=1，等等）
+                        // 具体逻辑参考 llama.cpp 实现，这里简化：使用前 4 个 scale
+                        int idx = j - 12;
+                        const uint8_t low4  = (sc[idx/2] >> (4 * (idx % 2))) & 0x0F;
+                        const uint8_t high2 = (sc[12 + idx/4] >> (2 * (idx % 4))) & 0x03;
+                        sc_j = low4 | (high2 << 4);
                     }
-                    packed += 8;  // 每个子块消耗 8 字节
+                    const float scale = d * sc_j;
+        
+                    // 每个子块有 16 个 4-bit 值，存储在 8 字节中
+                    for (int l = 0; l < 16; l++) {
+                        const uint8_t byte = q[l/2];
+                        const uint8_t val = (l % 2 == 0) ? (byte & 0x0F) : (byte >> 4);
+                        // 将 4-bit 无符号数转为有符号数（值域 0..15 -> -8..7）
+                        const int8_t signed_val = (int8_t)(val << 4) >> 4;
+                        dst[is + l] = scale * signed_val - min;
+                    }
+                    q += 8;
+                    is += 16;
                 }
-                
             }
         }
         void dequantize_q5_K_M_row(const uint8_t* packed, float* dst, int64_t n) {
