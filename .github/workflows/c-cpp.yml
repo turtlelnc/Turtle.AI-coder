@@ -33,7 +33,7 @@ jobs:
             packages: mingw-w64-x86_64-gcc make
             artifact: infer-windows
             compile_cmd: |
-              g++ -std=c++17 -O3 -march=native -fopenmp -pthread infer.cpp -o infer.exe
+              g++ -std=c++17 -O3 -march=native -fopenmp -pthread -static infer.cpp -o infer.exe
 
     steps:
     - name: Checkout code
