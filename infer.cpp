@@ -716,22 +716,17 @@ namespace infer {
             return -1;
         }
         bool load(const std::string& path) {
-#ifdef _WIN32
-            int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-            std::wstring wpath(wlen, 0);
-            MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wpath[0], wlen);
-            HANDLE h = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (h == INVALID_HANDLE_VALUE) return false;
-            int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
-            if (fd == -1) { CloseHandle(h); return false; }
-            FILE* fp = _fdopen(fd, "rb");
-            if (!fp) { _close(fd); return false; }
-            file_ = std::ifstream(fp);
-#else
-            file_.open(path, std::ios::binary);
-            if (!file_) return false;
-#endif
-
+            #ifdef _WIN32
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+                std::wstring wpath(wlen, 0);
+                MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, &wpath[0], wlen);
+                file_.open(wpath.c_str(), std::ios::binary);
+                if (!file_) return false;
+            #else
+                file_.open(path, std::ios::binary);
+                if (!file_) return false;
+            #endif
+            
             if (!read_header()) return false;
             if (!read_metadata()) return false;
             if (!read_tensor_infos()) return false;
