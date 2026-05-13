@@ -3,9 +3,9 @@ Our AI that focuses on writing code.
 
 try to do sth.
 
-## 简体中文（chinese）
+## 简体中文（Chinese）
 
-尝试做某事（口号是：try to do sth.（因为英语老师老是说））。
+试试就逝世（英文版口号是：try to do sth）。
 
 你好 ！我们是turtle。由于团队刚来到 Github ，还不熟悉 Github 的操作，可能会导致一些提交时创建其他分支等等情况，请您谅解。
 
