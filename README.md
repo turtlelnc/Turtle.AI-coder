@@ -13,7 +13,7 @@ try to do sth.
 
 我们的软件部分为中文，请外国人谅解。
 
-我们使用了各种AI来制作，即AI做AI
+我们使用了各种AI来制作，即AI做AI（通常使用 DeepSeek 和 Gemini）
 
 我们的仓库有多个分支，分为前端、后端（模型）、下载应用程序和一些乱七八糟的分支
 
@@ -29,7 +29,7 @@ We are new here , please be more understanding about something we not do really 
 
 Our software is partly in Chinese, foreigners please understand.
 
-We use various AI to produce, that is, AI does AI
+We use various AI to produce, that is, AI does AI.(Typically uses DeepSeek and Gemini)
 
 Our warehouse has multiple branches, divided into front-end, back-end (model), download application and some messy branches
 
