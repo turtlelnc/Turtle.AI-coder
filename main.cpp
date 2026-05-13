@@ -35,7 +35,7 @@ constexpr float THRUST_MAX      = 1.0f;
 constexpr int   MAX_SEQ_LEN     = 256;     // 与训练时的 seq_len 一致
 constexpr int   MAX_DIM         = 256;
 constexpr int   MAX_HEADS       = 8;
-constexpr int   MAX_EXPERTS     = 8;
+constexpr int MAX_EXPERTS = 32;
 
 // ============================================================================
 // 数值稳定激活函数
@@ -249,6 +249,8 @@ struct LoopEmbedding {
 // ============================================================================
 // 混合注意力模块（滑动窗口 + 因果稀疏全局，已修复所有致命错误）
 // ============================================================================
+
+
 struct AttnCache { Matrix q, k, v, out; std::vector<Matrix> attn_probs; };
 
 struct SlidingWindowAttention {
@@ -658,7 +660,63 @@ struct ACT {
 };
 
 struct RecurrentStepCache { Matrix x, n_attn, a_out, mid, n_moe; AttnCache a_c; MoECache m_c; };
+// 一个不包含循环的普通 Transformer 块（宽层）
+struct TransformerBlock {
+    SlidingWindowAttention attn_sw;
+    MoE moe;
+    RMSNorm n_attn, n_moe;
+    Matrix *attn_scores, *attn_probs, *attn_tmp;
+
+    // 缓存上一次 forward 的中间值
+    mutable Matrix last_x;
+    mutable AttnCache last_a_cache;
+    mutable MoECache last_m_cache;
+    mutable Matrix last_normed_attn, last_normed_moe;
+
+    TransformerBlock(int dim, int window_size, int moe_experts, int moe_topk,
+                     Matrix* scores, Matrix* probs, Matrix* tmp)
+        : attn_sw(dim, 8, window_size),
+          moe(dim, dim*4, moe_experts, moe_topk),
+          n_attn(dim), n_moe(dim),
+          attn_scores(scores), attn_probs(probs), attn_tmp(tmp) {
+        attn_sw.set_buf(scores, probs, tmp);
+    }
+
+    Matrix forward(const Matrix& x) {
+        last_x = x;
+        last_normed_attn = n_attn.forward(x);
+        Matrix a_out = attn_sw.forward(last_normed_attn, last_a_cache);
+        Matrix mid1 = x + a_out;
+        last_normed_moe = n_moe.forward(mid1);
+        Matrix m_out = moe.forward(last_normed_moe, last_m_cache);
+        Matrix out = mid1 + m_out;
+        return out;
+    }
+
+    Matrix backward(const Matrix& dout) {
+        // dout 是损失对该块输出的梯度
+        Matrix dm_out = dout;
+        // MoE 反向
+        Matrix d_normed_moe = moe.backward(dm_out, last_m_cache);
+        // n_moe 反向
+        Matrix dmid1 = n_moe.backward(d_normed_moe, last_normed_moe);
+        Matrix da_out = dmid1;
+        // 注意力反向
+        Matrix d_normed_attn = attn_sw.backward(da_out, last_normed_attn, last_a_cache);
+        // n_attn 反向
+        Matrix dx2 = n_attn.backward(d_normed_attn, last_x);
+        return dmid1 + dx2;   // dmid1 是 dx1
+    }
+
+    void step(float lr, float gn, float b1_corr, float b2_corr) {
+        attn_sw.step(lr, gn, b1_corr, b2_corr);
+        moe.step(lr, gn, b1_corr, b2_corr);
+        n_attn.step(lr, b1_corr, b2_corr);
+        n_moe.step(lr, b1_corr, b2_corr);
+    }
+};
 struct RecurrentBlock {
+    std::vector<std::unique_ptr<TransformerBlock>> wide_blocks;
     LoopEmbedding loop_embed;
     SlidingWindowAttention attn_sw;
     SparseGlobalAttention attn_global;
@@ -667,55 +725,119 @@ struct RecurrentBlock {
     ACT act;
     std::vector<RecurrentStepCache> b_cache;
     ACTCache a_cache;
+    float memory_alpha = 0.9f;
 
-    RecurrentBlock(int d, int l, int window_size, int global_topk,
-                   Matrix* scores, Matrix* probs, Matrix* tmp)
-        : loop_embed(l, d),
-          attn_sw(d, 8, window_size), attn_global(d, 8, global_topk),
-          moe(d, d*4, 8, 2), n_attn(d), n_moe(d), act(d, l) {
-        attn_sw.set_buf(scores, probs, tmp);
-        attn_global.set_buf(scores, probs, tmp);
+    Matrix work_scores, work_probs, work_tmp;
+
+    RecurrentBlock(int dim, int max_loops, int window_size, int global_topk,
+                   int moe_experts, int moe_topk, int num_wide_blocks)
+        : loop_embed(max_loops, dim),
+          attn_sw(dim, 8, window_size),
+          attn_global(dim, 8, global_topk),
+          moe(dim, dim*4, moe_experts, moe_topk),
+          n_attn(dim), n_moe(dim), act(dim, max_loops),
+          work_scores(MAX_SEQ_LEN, MAX_SEQ_LEN),
+          work_probs(MAX_SEQ_LEN, MAX_SEQ_LEN),
+          work_tmp(MAX_SEQ_LEN, dim) {
+
+        attn_sw.set_buf(&work_scores, &work_probs, &work_tmp);
+        attn_global.set_buf(&work_scores, &work_probs, &work_tmp);
+
+        for (int i = 0; i < num_wide_blocks; ++i) {
+            wide_blocks.push_back(std::make_unique<TransformerBlock>(
+                dim, window_size, moe_experts, moe_topk,
+                &work_scores, &work_probs, &work_tmp));
+        }
     }
 
     Matrix forward(Matrix x) {
+        // 宽层
+        for (auto& blk : wide_blocks) {
+            x = blk->forward(x);
+        }
+
+        // 深层循环 + 分层记忆
         b_cache.clear();
         b_cache.reserve(act.max_loops);
         std::vector<Matrix> hs;
+        Matrix memory = Matrix::Zero(x.rows(), x.cols());
+
         for (int t = 0; t < act.max_loops; ++t) {
-            RecurrentStepCache c; c.x = x; c.n_attn = n_attn.forward(x);
+            RecurrentStepCache c;
+            c.x = x;
+            c.n_attn = n_attn.forward(x);
+            c.n_attn += memory * 0.1f;
+
             x += loop_embed.forward(t, x.rows());
+
             if (t % 2 == 0)
                 c.a_out = attn_sw.forward(c.n_attn, c.a_c);
             else
                 c.a_out = attn_global.forward(c.n_attn, c.a_c);
+
             c.mid = x + c.a_out;
             c.n_moe = n_moe.forward(c.mid);
             Matrix m_out = moe.forward(c.n_moe, c.m_c);
             x = c.mid + m_out;
-            hs.push_back(x); b_cache.push_back(c);
+
+            memory = memory_alpha * memory + (1.0f - memory_alpha) * x;
+
+            hs.push_back(x);
+            b_cache.push_back(c);
         }
+
         return act.forward(hs, a_cache);
     }
 
     Matrix backward(const Matrix& dout) {
         std::vector<Matrix> dhs = act.backward(dout, a_cache);
-        Matrix dx = Matrix::Zero(dout.rows(), dout.cols());
-        for (int t = (int)b_cache.size()-1; t >= 0; --t) {
-            auto& c = b_cache[t]; Matrix ds = dhs[t] + dx;
-            loop_embed.backward(ds, t);
-            Matrix dnm = moe.backward(ds, c.m_c);
-            Matrix dm = ds + n_moe.backward(dnm, c.mid);
-            Matrix dna;
+        int L = dout.rows(), D = dout.cols();
+        Matrix dx = Matrix::Zero(L, D);
+        Matrix dmem_new = Matrix::Zero(L, D);
+
+        for (int t = (int)b_cache.size() - 1; t >= 0; --t) {
+            auto& c = b_cache[t];
+            Matrix dx_cur = dhs[t] + dmem_new * (1.0f - memory_alpha);
+            dmem_new *= memory_alpha;  // dmem_prev 的初始部分
+
+            // MoE 反向
+            Matrix d_n_moe = moe.backward(dx_cur, c.m_c);
+            Matrix d_mid = n_moe.backward(d_n_moe, c.mid);
+            Matrix da_out = d_mid;
+            Matrix dx_mid_in = d_mid;
+
+            // 注意力反向
+            Matrix d_n_attn;
             if (t % 2 == 0)
-                dna = attn_sw.backward(dm, c.n_attn, c.a_c);
+                d_n_attn = attn_sw.backward(da_out, c.n_attn, c.a_c);
             else
-                dna = attn_global.backward(dm, c.n_attn, c.a_c);
-            dx = dm + n_attn.backward(dna, c.x);
+                d_n_attn = attn_global.backward(da_out, c.n_attn, c.a_c);
+
+            // 记忆注入梯度
+            dmem_new += d_n_attn * 0.1f;
+            Matrix d_n_attn_out = d_n_attn;
+            Matrix d_x_prev_attn = n_attn.backward(d_n_attn_out, c.x);
+
+            // loop_embed
+            loop_embed.backward(dx_mid_in, t);
+            Matrix d_x_prev_mid = dx_mid_in;
+
+            Matrix d_x_prev = d_x_prev_mid + d_x_prev_attn;
+            dx = d_x_prev;
         }
+
+        // 宽层反向
+        for (int i = (int)wide_blocks.size() - 1; i >= 0; --i) {
+            dx = wide_blocks[i]->backward(dx);
+        }
+
         return dx;
     }
 
     void step(float lr, float gn, float b1_corr, float b2_corr) {
+        for (auto& blk : wide_blocks) {
+            blk->step(lr, gn, b1_corr, b2_corr);
+        }
         attn_sw.step(lr, gn, b1_corr, b2_corr);
         attn_global.step(lr, gn, b1_corr, b2_corr);
         moe.step(lr, gn, b1_corr, b2_corr);
@@ -724,13 +846,36 @@ struct RecurrentBlock {
         act.step(lr, gn, b1_corr, b2_corr);
         loop_embed.step(lr, gn, b1_corr, b2_corr);
     }
+
     void save(std::ostream& os) const {
-        n_attn.save(os); attn_sw.save(os); attn_global.save(os);
-        n_moe.save(os); moe.save(os); act.save(os);
+        n_attn.save(os);
+        attn_sw.save(os);
+        attn_global.save(os);
+        n_moe.save(os);
+        moe.save(os);
+        act.save(os);
+        // 宽层的保存
+        for (auto& blk : wide_blocks) {
+            blk->attn_sw.save(os);
+            blk->moe.save(os);
+            blk->n_attn.save(os);
+            blk->n_moe.save(os);
+        }
     }
+
     void load(std::istream& is) {
-        n_attn.load(is); attn_sw.load(is); attn_global.load(is);
-        n_moe.load(is); moe.load(is); act.load(is);
+        n_attn.load(is);
+        attn_sw.load(is);
+        attn_global.load(is);
+        n_moe.load(is);
+        moe.load(is);
+        act.load(is);
+        for (auto& blk : wide_blocks) {
+            blk->attn_sw.load(is);
+            blk->moe.load(is);
+            blk->n_attn.load(is);
+            blk->n_moe.load(is);
+        }
     }
 };
 
@@ -744,14 +889,15 @@ struct OpenMythos {
     Matrix work_scores, work_probs, work_tmp;
     Matrix h_out, f_normed;
 
-    OpenMythos(int vocab, int dim, int max_loop, int window_size, int global_topk)
+    OpenMythos(int vocab, int dim, int max_loop, int window_size, int global_topk,
+            int moe_experts, int moe_topk, int num_wide_blocks)
         : embed(vocab, dim), lm_head(dim, vocab),
-          recurrent(dim, max_loop, window_size, global_topk,
-                    &work_scores, &work_probs, &work_tmp),
-          final_norm(dim),
-          work_scores(MAX_SEQ_LEN, MAX_SEQ_LEN),
-          work_probs(MAX_SEQ_LEN, MAX_SEQ_LEN),
-          work_tmp(MAX_SEQ_LEN, dim) {}
+        recurrent(dim, max_loop, window_size, global_topk,
+                    moe_experts, moe_topk, num_wide_blocks),
+        final_norm(dim),
+        work_scores(MAX_SEQ_LEN, MAX_SEQ_LEN),
+        work_probs(MAX_SEQ_LEN, MAX_SEQ_LEN),
+        work_tmp(MAX_SEQ_LEN, dim) {}
 
     Matrix forward(const Eigen::MatrixXi& ids) {
         int BT = ids.rows(); Matrix x(BT, embed.W.cols());
@@ -846,9 +992,16 @@ float get_lr(int s, int ts, float p, int w, float m) {
 }
 
 int main(int argc, char* argv[]) {
+    int dim = 128, max_loop = 6;
+    int window_size = 64, global_topk = 32;
+    int seq_len = 128, accum = 8;
+    int moe_experts = 16, moe_topk = 2, num_wide_blocks = 3;
+    std::cout<<"版本1.0.2  Version 1.0.2"<<std::endl;
+
     if (argc >= 3 && std::string(argv[1]) == "gen") {
         bpe::BPETrainer tokenizer; tokenizer.load("tokenizer.bpe");
-        OpenMythos model(tokenizer.vocab_size(), 128, 3, 64, 32);
+        OpenMythos model(tokenizer.vocab_size(), dim, max_loop, window_size, global_topk,
+                 moe_experts, moe_topk, num_wide_blocks);
         model.load_checkpoint("openmythos_model.ckpt", "");
         std::string prompt = argv[2];
         std::cout << "Prompt: " << prompt << "\nGenerated: "
@@ -869,10 +1022,9 @@ int main(int argc, char* argv[]) {
     if (!tokenizer.has_cached_tokens()) { tokenizer.set_cached_tokens(tokens); tokenizer.save("tokenizer.bpe", ds_id); }
 
     int vocab = tokenizer.vocab_size();
-    int dim = 128, max_loop = 4;          // 4 次循环，交替更充分
-    int window_size = 64, global_topk = 32;
-    int seq_len = 128, accum = 8;
-    OpenMythos model(vocab, dim, max_loop, window_size, global_topk);
+
+    OpenMythos model(vocab, dim, max_loop, window_size, global_topk,
+        moe_experts, moe_topk, num_wide_blocks);
     int start_step = model.load_checkpoint("openmythos_model.ckpt", ds_id);
     if (start_step < 0) start_step = 0;
 
